@@ -27,20 +27,24 @@ def two_adic_of_sigma(p, a):
     return c
 
 _fcache = {}
+_SMALL_PRIMES = list(primerange(2, 3000))
 def partial_factor(n):
     """(dict prime->exp, list of composite leftovers with no factor < 3000)"""
     if n in _fcache: return _fcache[n]
-    f = factorint(n, limit=3000)     # trial division only; leftovers may be composite
+    # own trial division (SymPy's factorint(limit=...) can poison its internal cache with composites)
     primes, comps, stack = {}, [], []
-    for q, e in f.items():
-        if isprime(q): primes[q] = primes.get(q, 0) + e
-        else: stack += [q] * e
+    rest = n
+    for q in _SMALL_PRIMES:
+        if q * q > rest: break
+        while rest % q == 0: primes[q] = primes.get(q, 0) + 1; rest //= q
+    if rest > 1: stack.append(rest)
     while stack:
         c = stack.pop()
         if isprime(c): primes[c] = primes.get(c, 0) + 1; continue
         d = pollard_rho(c, max_steps=4000)
         if d is None or d in (1, c): comps.append(c)
         else: stack += [d, c // d]
+    if len(_fcache) > 200000: _fcache.clear()      # bounded memory on long runs
     res = (primes, comps); _fcache[n] = res; return res
 
 def coprime_pieces(comps):
@@ -191,7 +195,7 @@ def check(k, Bexp, limit, piece13=None, piece2=None):
             stack.extend(reversed(children))
     return stats, True, time.time() - t0
 
-if __name__ == '__main__':
+def _main():
     k = int(sys.argv[1]); Bexp = int(sys.argv[2]); limit = float(sys.argv[3]) if len(sys.argv) > 3 else 600
     piece13 = None
     if len(sys.argv) > 4: piece13 = 'tail' if sys.argv[4] == 'tail' else int(sys.argv[4])
@@ -202,3 +206,13 @@ if __name__ == '__main__':
     verdict = (f"CHECK: omega != {k} PROVED" if done and stats['open'] == 0 and not others else ("CHECK: TIMEOUT" if not done else "CHECK: INCONCLUSIVE")) + tag
     print(f"{verdict} in {secs:.1f}s: nodes={stats['nodes']} dead={stats['dead']} open={stats['open']} solutions={stats['solutions']}")
     json.dump(dict(k=k, B=Bexp, verdict=verdict, stats=stats), open(f"check_k{k}_B{Bexp}" + ('' if piece13 is None else f"_13e{piece13}") + ('' if piece2 is None else f"_p{piece2}") + ".json", 'w'))
+    return verdict
+
+if __name__ == '__main__':
+    import traceback, datetime
+    try:
+        v = _main()
+        open('omega_log.txt', 'a').write(f"{datetime.datetime.now()}  {' '.join(sys.argv)}  ->  {v}\n")
+    except BaseException:
+        open('omega_log.txt', 'a').write(f"{datetime.datetime.now()}  {' '.join(sys.argv)}  ->  ERROR\n{traceback.format_exc()}\n")
+        raise

@@ -1,8 +1,23 @@
 """Independent verifier for engine3 certificates.
-Usage: python verify.py cert_91_1e60.json 60
+Usage: python verify.py cert_91_1e60.json 60 [plain]
 Shares no code with the search engine: own primality test, own sigma, own enumeration.
 It re-derives every claim from the raw arithmetic and reports the certified lower bound
-on any friend m != n, or FAILS with the first unjustified step."""
+on any friend m != n, or FAILS with the first unjustified step.
+
+Bounds.  Every leaf lambda = ((p1,w1),...,(pt,wt)) of an alive branch k certifies
+m >= 2^k * prod p_i^w_i for any friend m consistent with it ("leaf product").  At an
+unfactored or free leaf the residual A/B of the leaf is known exactly, and (P4) gives
+B | m', so the leaf also certifies m >= 2^k * prod p_i^w_i * B ("strengthened").  A cap
+leaf stands for every exponent >= w_t, so its residual is not known and only the leaf
+product is used.  By default the strengthened bound is reported and compared with the
+claimed exponent X; the optional third argument "plain" uses the leaf product only.
+All comparisons are exact integer comparisons; no floating point enters the verdict.
+
+Structure.  Each alive branch must contain its root node (empty path), and every other
+node must be the child of an internal node that lists its last exponent as "child" (or
+"cap" for a cap leaf); unreachable or orphaned nodes are rejected.  Together with the
+re-enumeration of exponents at every internal node this guarantees that the certificate
+is the complete tree of Section 4, not a subset of it."""
 import sys, json, math
 from fractions import Fraction
 
@@ -12,7 +27,7 @@ def is_prime(n):
         if n % p == 0: return n == p
     d, s = n-1, 0
     while d % 2 == 0: d //= 2; s += 1
-    for a in (2,3,5,7,11,13,17,19,23,29,31,37):   # deterministic for n < 3.3e24; strong probable prime beyond
+    for a in (2,3,5,7,11,13,17,19,23,29,31,37):   # deterministic for n < 3.18e23 (Sorenson-Webster); strong probable prime beyond
         x = pow(a, d, n)
         if x in (1, n-1): continue
         for _ in range(s-1):
@@ -41,8 +56,15 @@ fails = []
 def fail(msg): fails.append(msg)
 
 def main():
-    cert = json.load(open(sys.argv[1])); X = float(sys.argv[2])
+    cert = json.load(open(sys.argv[1])); X = Fraction(sys.argv[2])
+    plain = len(sys.argv) > 3 and sys.argv[3] == 'plain'
     n = cert['n']; cap = 10**cert['cap']
+    tenX = None if X.denominator != 1 else 10**int(X)
+    def above_claim(M):      # exact: is M > 10^X ?  (log10 comparison only when X is not an integer)
+        return M > tenX if tenX is not None else math.log10(M) > X
+    best = {'plain': None, 'strong': None}     # exact integer minima over all leaves
+    def record(which, M):
+        best[which] = M if best[which] is None else min(best[which], M)
     nf = small_factor(n)
     T = Fraction(1)
     for p, e in nf.items(): T *= I(p, e)
@@ -60,7 +82,6 @@ def main():
     cert_k = {br['k'] for br in cert['branches']}
     for k, r in alive_k:
         if k not in cert_k: fail(f"alive 2-adic branch k={k} missing from certificate")
-    bound_log = None
     for br in cert['branches']:
         k = br['k']
         if not br['complete']: fail(f"branch k={k} incomplete (timed out)")
@@ -69,18 +90,28 @@ def main():
         nodes = br['nodes']
         bypath = {tuple(map(tuple, nd['path'])): nd for nd in nodes}
         if len(bypath) != len(nodes): fail("duplicate node paths")
+        if () not in bypath: fail(f"branch k={k}: root node missing"); continue
         for nd in nodes:
             path = tuple(map(tuple, nd['path']))
+            if path:   # every non-root node must hang off an internal node that lists it
+                parent = bypath.get(path[:-1])
+                if parent is None or parent.get('kind') != 'internal':
+                    fail(f"node {path}: parent missing or not internal"); continue
+                p, e = path[-1]
+                if parent.get('branch_prime') != p: fail(f"node {path}: parent branches on {parent.get('branch_prime')}, not {p}")
+                want = 'cap' if nd['kind'] == 'cap' else 'child'
+                lab = next((it[1] for it in parent['exponents'] if int(it[0]) == e), None)
+                if lab != want: fail(f"node {path}: parent labels exponent {e} as {lab}, expected {want}")
             # recompute residual from the path
             r = r0
             for p, e in path: r /= I(p, e)
+            P = 2**k
+            for p, e in path: P *= p**e
             if nd['kind'] == 'cap':
                 p, e = path[-1]
                 if sig(p, e) <= cap: fail(f"cap node {path}: sigma not above cap")
-                parent = bypath.get(path[:-1])
-                if parent is None or parent.get('kind') != 'internal': fail(f"cap node {path} has no internal parent")
-                lg = sum(e*math.log10(p) for p, e in path) + k*math.log10(2)
-                bound_log = lg if bound_log is None else min(bound_log, lg)
+                record('plain', P); record('strong', P)
+                if not above_claim(P): fail(f"cap node {path}: leaf product 10^{math.log10(P):.4f} below claimed bound 10^{float(X)}")
                 continue
             if str(r) != nd['r']: fail(f"node {path}: residual mismatch {r} vs {nd['r']}"); continue
             A, B = r.numerator, r.denominator
@@ -93,9 +124,9 @@ def main():
                 if m != n: fail(f"FRIEND CLAIMED: {m}")
                 continue
             if kind in ('unfactored', 'free'):
-                lg = sum(e*math.log10(p) for p, e in path) + k*math.log10(2)
-                if lg < X: fail(f"{kind} node {path}: path product 10^{lg:.1f} below claimed bound 10^{X}")
-                bound_log = lg if bound_log is None else min(bound_log, lg)
+                record('plain', P); record('strong', P * B)      # B | m' by (P4), so m >= 2^k * prod p^e * B
+                M = P if plain else P * B
+                if not above_claim(M): fail(f"{kind} node {path}: certified 10^{math.log10(M):.4f} below claimed bound 10^{float(X)}")
                 continue
             if kind == 'dead':
                 why = nd['reason']
@@ -175,7 +206,10 @@ def main():
         if len(fails) > 30: print("  ...", len(fails), "failures")
         sys.exit(1)
     print(f"VERIFIED: every node of the certificate for n={n} is justified.")
-    print(f"Certified: any friend m != {n} satisfies m > 10^{bound_log:.2f}  (claimed 10^{X})")
-    if bound_log < X: print("WARNING: certified bound is below the claimed one"); sys.exit(1)
+    print(f"Leaf-product bound:  any friend m != {n} satisfies m >= {best['plain']}  (10^{math.log10(best['plain']):.4f})")
+    print(f"Strengthened bound:  any friend m != {n} satisfies m >= {best['strong']}  (10^{math.log10(best['strong']):.4f})")
+    M = best['plain'] if plain else best['strong']
+    print(f"Certified: any friend m != {n} satisfies m > 10^{math.log10(M):.2f}  (claimed 10^{float(X)}, rule: {'leaf product' if plain else 'strengthened'})")
+    if not above_claim(M): print("WARNING: certified bound is below the claimed one"); sys.exit(1)
 
 main()

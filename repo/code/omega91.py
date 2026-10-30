@@ -63,6 +63,7 @@ def quick_factor(s):
         d = _rho_bounded(x, 3000)
         if d: stack += [d, x // d]
         else: comps.append(x)
+    if len(_QF) > 200000: _QF.clear()               # bounded memory on long runs
     r = (f, comps); _QF[s] = r; return r
 
 def guaranteed(C):
@@ -231,8 +232,7 @@ def run(k, Bexp, limit, only13=None, only2=None):
     except Timeout: done = False
     return S, done, time.time() - t0
 
-if __name__ == '__main__':
-    import multiprocessing; multiprocessing.set_start_method('spawn', force=True)
+def _main():
     k = int(sys.argv[1]); Bexp = int(sys.argv[2]); limit = float(sys.argv[3]) if len(sys.argv) > 3 else 600
     only13 = None
     if len(sys.argv) > 4: only13 = 'tail' if sys.argv[4] == 'tail' else int(sys.argv[4])
@@ -247,3 +247,14 @@ if __name__ == '__main__':
     for o in st['opens'][:8]: print("   OPEN:", o)
     if sol: print("   SOLUTIONS:", sol)
     json.dump(dict(k=k, B=Bexp, verdict=verdict, stats={a: b for a, b in st.items() if a not in ('candidates', 'opens')}, opens=[str(o) for o in st['opens'][:200]], solutions=sol), open(f'omega91_k{k}_B{Bexp}' + ('' if only13 is None else f'_13e{only13}') + ('' if only2 is None else f'_p{only2}') + '.json', 'w'))
+    return verdict
+
+if __name__ == '__main__':
+    import multiprocessing, traceback, datetime
+    multiprocessing.set_start_method('spawn', force=True)
+    try:
+        v = _main()
+        open('omega_log.txt', 'a').write(f"{datetime.datetime.now()}  {' '.join(sys.argv)}  ->  {v}\n")
+    except BaseException:
+        open('omega_log.txt', 'a').write(f"{datetime.datetime.now()}  {' '.join(sys.argv)}  ->  ERROR\n{traceback.format_exc()}\n")
+        raise
